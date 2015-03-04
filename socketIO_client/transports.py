@@ -6,6 +6,7 @@ import re
 import requests
 import six
 import socket
+import ssl
 import time
 import websocket
 
@@ -135,7 +136,10 @@ class WebsocketTransport(_AbstractTransport):
 
         try:
             _log.debug("[websocket] Connecting to: %s" % self._url);
-            self._connection = websocket.create_connection(self._url);
+            if "verify" in kw and not kw["verify"]:
+                self._connection = websocket.create_connection(self._url, sslopt={"cert_reqs": ssl.CERT_NONE});
+            else:
+                self._connection = websocket.create_connection(self._url);
         except socket.timeout as e:
             raise ConnectionError(e)
         except socket.error as e:
