@@ -5,6 +5,7 @@ import json
 import parser
 from parser import Message, Packet, MessageType, PacketType
 import requests
+import sys
 import threading
 import time
 
@@ -707,5 +708,8 @@ def _make_heartbeat_pacemaker(terminator, transport, heartbeat_interval):
             message = "[heartbeat] disconnected while sending PING";
             _log.warn(message);
         except:
-            pass;
+            e = sys.exc_info()[0];
+            message = "[heartbeat] Abnormal exception caught: %s. Aborting heartbeat." % str(e);
+            _log.warn(message);
+            break;
     _log.debug("[heartbeat terminated]");
