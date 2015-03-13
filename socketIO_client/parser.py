@@ -15,6 +15,8 @@ class PacketType(Enum):
     UPGRADE = 5;
     NOOP = 6;
 
+    UNKNOWN = -1000;
+
 class MessageType(Enum):
     CONNECT = 0;
     DISCONNECT = 1;
@@ -204,6 +206,9 @@ def decode_response(response):
             
 
 def decode_packet_string(packet):
+    if (len(packet) == 0):
+        return Packet(PacketType.UNKNOWN, "");
+
     packet_type = int(packet[0]);
     payload = packet[1:];
 
