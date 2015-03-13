@@ -305,7 +305,7 @@ class SocketIO(object):
             try:
                 self._process_packet(packet)
             except PacketError as e:
-                _log.warn('[packet error] %s', e)
+                _log.warn('[packet error] %s', str(e))
 
     def _get_message_delegate(self, code):
         try:
@@ -436,11 +436,10 @@ class SocketIO(object):
         """
         websocket = transports.WebsocketTransport(self.session, self.is_secure, self.base_url, **self.kw);
         websocket.send_packet(PacketType.PING, "", "probe");
-
         for packet in websocket.recv_packet():
             _log.debug("[websocket] Packet: %s" % str(packet));
             if packet.type == PacketType.PONG:
-                _log.debug("[PONG] %s" % repr(packet));
+                _log.debug("[PONG] %s" % str(packet));
 
                 # Technically we would need to pause the current
                 # transport (which should be polling in this
@@ -662,7 +661,6 @@ def _yield_warning_screen(seconds=None):
                 _log.warn(warning)
             time.sleep(RETRY_INTERVAL_IN_SECONDS)
 
-
 def _yield_elapsed_time(seconds=None):
     start_time = time.time()
     if seconds is None:
@@ -712,4 +710,4 @@ def _make_heartbeat_pacemaker(terminator, transport, heartbeat_interval):
             message = "[heartbeat] Abnormal exception caught: %s. Aborting heartbeat." % str(e);
             _log.warn(message);
             break;
-    _log.debug("[heartbeat terminated]");
+    _log.debug("[heartbeat terminated]");        
