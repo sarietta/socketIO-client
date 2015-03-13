@@ -8,6 +8,7 @@ import six
 import socket
 import ssl
 import time
+import threading
 import websocket
 
 from .exceptions import SocketIOError, ConnectionError, TimeoutError
@@ -163,7 +164,7 @@ class WebsocketTransport(_AbstractTransport):
         self.send_message(Message(code, data));
 
     def send(self, packet_text):
-        _log.debug("[websocket] send: " + str(packet_text));
+        _log.debug("(%d) [websocket] send: %s" % (threading.current_thread().ident, str(packet_text)));
         try:
             self._connection.ping();
             self._connection.send(packet_text);

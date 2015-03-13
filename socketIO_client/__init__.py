@@ -4,6 +4,7 @@ import logging
 import json
 import parser
 from parser import Message, Packet, MessageType, PacketType
+import Queue
 import requests
 import sys
 import threading
@@ -52,11 +53,11 @@ class BaseNamespace(object):
 
     def on_connect(self):
         'Called after server connects; you can override this method'
-        _log.debug('%s [connect]', self.path)
+        _log.debug('(%d) %s [connect]', threading.current_thread().ident, self.path)
 
     def on_disconnect(self):
         'Called after server disconnects; you can override this method'
-        _log.debug('%s [disconnect]', self.path)
+        _log.debug('(%d) %s [disconnect]', threading.current_thread().ident, self.path)
 
     def on_event(self, event, *args):
         """
@@ -69,35 +70,35 @@ class BaseNamespace(object):
         if callback:
             arguments.append('callback(*args)')
             callback(*args)
-        _log.info('%s [event] %s(%s)', self.path, event, ', '.join(arguments))
+        _log.info('(%d) %s [event] %s(%s)', threading.current_thread().ident, self.path, event, ', '.join(arguments))
 
     def on_error(self, reason):
         'Called after server sends an error; you can override this method'
-        _log.info('%s [error] %s', self.path, reason)
+        _log.info('(%d) %s [error] %s', threading.current_thread().ident, self.path, reason)
 
     def on_noop(self):
         'Called after server sends a noop; you can override this method'
-        _log.debug('%s [noop]', self.path)
+        _log.debug('(%d) %s [noop]', threading.current_thread().ident, self.path)
 
     def on_ping(self):
         'Called after server sends a ping; you can override this method'
-        _log.debug('%s [ping]', self.path)
+        _log.debug('(%d) %s [ping]', threading.current_thread().ident, self.path)
 
     def on_pong(self):
         'Called after server sends a pong; you can override this method'
-        _log.debug('%s [pong]', self.path)
+        _log.debug('(%d) %s [pong]', threading.current_thread().ident, self.path)
 
     def on_open(self, *args):
-        _log.info('%s [open] %s', self.path, args)
+        _log.info('(%d) %s [open] %s', threading.current_thread().ident, self.path, args)
 
     def on_close(self, *args):
-        _log.info('%s [close] %s', self.path, args)
+        _log.info('(%d) %s [close] %s', threading.current_thread().ident, self.path, args)
 
     def on_retry(self, *args):
-        _log.info('%s [retry] %s', self.path, args)
+        _log.info('(%d) %s [retry] %s', threading.current_thread().ident, self.path, args)
 
     def on_reconnect(self, *args):
-        _log.info('%s [reconnect] %s', self.path, args)
+        _log.info('(%d) %s [reconnect] %s', threading.current_thread().ident, self.path, args)
 
     def _find_event_callback(self, event):
         # Check callbacks defined by on()
@@ -153,9 +154,15 @@ class SocketIO(object):
 
         self.__transport = None;
 
-        # These two fields work to control the heartbeat thread.
+        # These three fields work to control the heartbeat thread.
         self.heartbeat_terminator = None;
         self.heartbeat_thread = None;
+        self.heartbeat_pong = threading.Event();
+
+        # This allows errors in subprocesses (which may run in other
+        # threads) to communicate information that only the main
+        # thread should handle in the wait() function.
+        self.main_thread_queue = Queue.Queue();
 
         # Saved session information.
         self.session = None;
@@ -175,7 +182,7 @@ class SocketIO(object):
         self._event_retry_queue = [];
 
     def __enter__(self):
-        _log.debug("[enter]");
+        _log.debug("(%d) [enter]", threading.current_thread().ident);
         return self
 
     def __exit__(self, *exception_pack):
@@ -187,7 +194,7 @@ class SocketIO(object):
         self._terminate_heartbeat();
 
     def define(self, Namespace, path=''):
-        _log.debug("[define] Path: %s" % path);
+        _log.debug("(%d) [define] Path: %s" % (threading.current_thread().ident, path));
         namespace = Namespace(self, path)
         self._namespace_by_path[path] = namespace
 
@@ -213,17 +220,23 @@ class SocketIO(object):
         self._transport.emit(event.path, event.name, event.args, event.callback);
 
     def emit(self, event_name, *args, **kw):
+        """ Emit message via Socket.IO.
+        """
+        if self.__transport is None:
+            _log.warn("(%d) [emit] Transport is not valid" % threading.current_thread().ident);
+            return;
+
         path = kw.get('path', '')
         callback, args = find_callback(args, kw)
         event = SocketIOEvent(path, event_name, args, callback);
         self._event_retry_queue.append(event);
         try:
-            #import ipdb; ipdb.set_trace();
+            _log.debug("(%d) [emit] %s", threading.current_thread().ident, str(event));
             self._emit_event(event);
             self._event_retry_queue.pop();
         except ConnectionError as e:
-            _log.warn("[emit] Connection error: %s" % str(e));
-            self._handle_severed_connection();
+            _log.debug("[emit] Connection error: %s" % str(e));
+            self.main_thread_queue.put("_handle_severed_connection");
 
     def reconnect(self):
         """Reconnects the client.
@@ -288,6 +301,14 @@ class SocketIO(object):
                     pass
                 if self._stop_waiting(for_callbacks):
                     break
+
+                try:
+                    message = self.main_thread_queue.get(False);
+                    if message == "_handle_severed_connection":
+                        _log.debug("[wait] Received message on main thread: %s" % message);
+                        raise ConnectionError("Connection severed");
+                except Queue.Empty:
+                    pass;
 
             except ConnectionError as e:
                 try:
@@ -358,7 +379,7 @@ class SocketIO(object):
         # Use __transport to make sure that we do not reconnect inadvertently
         if for_callbacks and not self.__transport.has_ack_callback:
             return True
-        if self.__transport._wants_to_disconnect:
+        if (self.__transport is not None) and self.__transport._wants_to_disconnect:
             return True
         return False
 
@@ -398,6 +419,9 @@ class SocketIO(object):
                 self._create_transport();
                 break
             except ConnectionError as e:
+                _log.debug("[transport] Connection error while creating transport: %s" % str(e));
+                time.sleep(1);
+
                 if not self.wait_for_connection:
                     raise
                 try:
@@ -481,8 +505,9 @@ class SocketIO(object):
         _log.debug("[start heartbeat pacemaker]");
         self.heartbeat_terminator = threading.Event();
         self.heartbeat_thread = threading.Thread(
-            target = _make_heartbeat_pacemaker, 
-            args = (self.heartbeat_terminator, transport, self.session.heartbeat_interval / 2));
+            target = _make_heartbeat_pacemaker,
+            args = (self.heartbeat_terminator, transport, self.session.heartbeat_interval / 2, 
+                    self.heartbeat_pong, self.session.connection_timeout, self.main_thread_queue));
         self.heartbeat_thread.daemon = True;
         self.heartbeat_thread.start(); 
 
@@ -546,6 +571,7 @@ class SocketIO(object):
         find_event_callback('ping')()
 
     def _on_pong(self, packet, find_event_callback):
+        self.heartbeat_pong.set();
         find_event_callback('pong')()
 
     def _on_upgrade(self, packet, find_event_callback):
@@ -627,7 +653,7 @@ def _send_ack(socketio, path, packet_id, *args):
         socketio._transport.ack(path, packet_id, *args);
     except ConnectionError as e:
         _log.warn("[send ack] Connection error: %s" % str(e));
-        socketio._handle_severed_connection();                
+        socketio.main_thread_queue.put("_handle_severed_connection");
 
 def find_callback(args, kw=None):
     'Return callback whether passed as a last argument or as a keyword'
@@ -673,10 +699,11 @@ def _yield_elapsed_time(seconds=None):
 def _get_socketIO_session(is_secure, base_url, **kw):
     server_url = '%s://%s/?EIO=%d&transport=polling' \
                  % ('https' if is_secure else 'http', base_url, parser.ENGINEIO_PROTOCOL)
-    _log.debug('[session] %s', server_url)
+    _log.debug('(%d) [get session] %s', threading.current_thread().ident, server_url);
     try:
-        response = _get_response(requests.get, server_url, **kw)
+        response = _get_response(requests.get, server_url, **kw);
     except TimeoutError as e:
+        _log.debug("[get session] Timeout on session connect: %s" % str(e));
         raise ConnectionError(e)
 
     _log.debug("[response] %s", response.text);
@@ -695,19 +722,31 @@ def _get_socketIO_session(is_secure, base_url, **kw):
         connection_timeout = int(handshake["pingTimeout"]) / 1000,
         server_supported_transports = handshake["upgrades"]);
 
-def _make_heartbeat_pacemaker(terminator, transport, heartbeat_interval):
+def _make_heartbeat_pacemaker(terminator, transport, heartbeat_interval, heartbeat_pong, heartbeat_timeout, main_thread_queue):
+    aborted_abnormally = True;
     while True:
         if terminator.wait(heartbeat_interval):
+            aborted_abnormally = False;
             break;
         _log.debug("[hearbeat]");
         try:
             transport.send_heartbeat();
+            if not heartbeat_pong.wait(heartbeat_timeout):
+                _log.warn("[heartbeat] Did not get ping within heartbeat interval");
+                heartbeat_pong.clear();
+                break;
+            heartbeat_pong.clear();
         except requests.exceptions.ConnectionError as e:
             message = "[heartbeat] disconnected while sending PING";
             _log.warn(message);
+            break;
         except:
             e = sys.exc_info()[0];
             message = "[heartbeat] Abnormal exception caught: %s. Aborting heartbeat." % str(e);
             _log.warn(message);
             break;
-    _log.debug("[heartbeat terminated]");        
+    if aborted_abnormally:
+        main_thread_queue.put("_handle_severed_connection");
+        _log.debug("[heartbeat terminated] Abnormal");
+    else:
+        _log.debug("[heartbeat terminated] Terminated");
